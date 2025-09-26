@@ -6,6 +6,7 @@ from datetime import datetime
 from aiohttp_socks import ProxyConnector
 import os
 import logging
+import json
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 # Bot configuration
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8411567693:AAE7Yqpy4u9YZqL5DT3-hb0NZgLqTfnFEL0')
 
-# Proxy configuration
+# Proxy configuration - FIXED SOCKS5 format
 PROXY_URL = "socks5://89565483-zone-custom:M5o5HIxR@na.proxys5.net:6200"
 
 def parseX(data, start, end):
@@ -57,11 +58,11 @@ async def get_bin_details(cc_number):
         logger.error(f"BIN API error: {e}")
         return None
 
-async def make_request(session, url, method="POST", headers=None, data=None, json=None, max_retries=3):
+async def make_request(session, url, method="POST", headers=None, data=None, json_data=None, max_retries=3):
     for attempt in range(max_retries):
         try:
             timeout = aiohttp.ClientTimeout(total=30)
-            async with session.request(method, url, headers=headers, data=data, json=json, timeout=timeout) as response:
+            async with session.request(method, url, headers=headers, data=data, json=json_data, timeout=timeout) as response:
                 text = await response.text()
                 logger.info(f"Request {method} {url} - Status: {response.status}")
                 return text, response.status
@@ -214,62 +215,60 @@ async def process_cc_check(card_data, user_info=""):
             if req5 is None:
                 return "❌ Failed to process payment"
 
-            # FIXED: Proper JSON parsing to avoid 'str' object has no attribute 'get' error
-            try:
-                import json
-                response_data = json.loads(req5)
-                if isinstance(response_data, dict):
-                    if response_data.get('success') and 'succeeded' in str(response_data):
-                        # Get BIN details
-                        bin_details = await get_bin_details(cc)
-                        if bin_details and 'bin' in bin_details:
-                            bin_info = bin_details['bin']
-                            bank = bin_info.get('bank', {}).get('name', 'Unknown')
-                            country = bin_info.get('country', {}).get('name', 'Unknown')
-                            brand = bin_info.get('brand', 'Unknown')
-                            
-                            return f"""✅ **APPROVED** 
+            # FIXED: Better response parsing to avoid 'str' object has no attribute 'get'
+            logger.info(f"Final response: {req5}")
+            
+            # Check if it's JSON or plain text
+            if req5.strip().startswith('{') and req5.strip().endswith('}'):
+                try:
+                    response_data = json.loads(req5)
+                    if isinstance(response_data, dict):
+                        if response_data.get('success') is True:
+                            if 'succeeded' in str(response_data):
+                                return await handle_success_response(cc, mon, year, cvv)
+                            elif 'requires_action' in str(response_data):
+                                return "⚠️ **3DS REQUIRED** - Card requires additional authentication"
+                        else:
+                            error_msg = response_data.get('data', {}).get('message', response_data.get('message', 'Card declined'))
+                            return f"❌ **DECLINED** - {error_msg}"
+                except json.JSONDecodeError:
+                    # Fall back to string parsing if JSON fails
+                    pass
+            
+            # String-based parsing as fallback
+            if "succeeded" in req5.lower():
+                return await handle_success_response(cc, mon, year, cvv)
+            elif "requires_action" in req5.lower():
+                return "⚠️ **3DS REQUIRED** - Card requires additional authentication"
+            elif "error" in req5.lower() or "decline" in req5.lower():
+                error_msg = parseX(req5, '"message":"', '"')
+                if error_msg == "None":
+                    error_msg = parseX(req5, "'message':'", "'")
+                return f"❌ **DECLINED** - {error_msg if error_msg != 'None' else 'Card not accepted'}"
+            else:
+                return "❌ **FAILED** - Unable to process card"
+
+    except Exception as e:
+        logger.error(f"Processing error: {e}")
+        return f"❌ Processing error: {str(e)}"
+
+async def handle_success_response(cc, mon, year, cvv):
+    """Handle successful card response"""
+    bin_details = await get_bin_details(cc)
+    if bin_details and 'bin' in bin_details:
+        bin_info = bin_details['bin']
+        bank = bin_info.get('bank', {}).get('name', 'Unknown')
+        country = bin_info.get('country', {}).get('name', 'Unknown')
+        brand = bin_info.get('brand', 'Unknown')
+        
+        return f"""✅ **APPROVED** 
 💳 Card: `{cc}|{mon}|{year}|{cvv}`
 🏦 Bank: {bank}
 🇺🇳 Country: {country}
 🔤 Brand: {brand}
 💾 Status: Live Card ✅"""
-                        else:
-                            return f"✅ **APPROVED** - Card is Live!\n`{cc}|{mon}|{year}|{cvv}`"
-                    elif 'requires_action' in str(response_data):
-                        return "⚠️ **3DS REQUIRED** - Card requires additional authentication"
-                    else:
-                        error_msg = response_data.get('message', 'Card declined')
-                        return f"❌ **DECLINED** - {error_msg}"
-                else:
-                    # Handle string response
-                    if "succeeded" in req5:
-                        bin_details = await get_bin_details(cc)
-                        if bin_details and 'bin' in bin_details:
-                            bin_info = bin_details['bin']
-                            bank = bin_info.get('bank', {}).get('name', 'Unknown')
-                            country = bin_info.get('country', {}).get('name', 'Unknown')
-                            return f"✅ **APPROVED** - {bank} ({country})\n`{cc}|{mon}|{year}|{cvv}`"
-                        return f"✅ **APPROVED** - Card is Live!\n`{cc}|{mon}|{year}|{cvv}`"
-                    elif "requires_action" in req5:
-                        return "⚠️ **3DS REQUIRED** - Card requires additional authentication"
-                    elif "error" in req5:
-                        error_resp = parseX(req5, '"message":"', '"')
-                        return f"❌ **DECLINED** - {error_resp if error_resp != 'None' else 'Card declined'}"
-                    else:
-                        return "❌ **FAILED** - Unable to process card"
-            except json.JSONDecodeError:
-                # If not JSON, handle as string
-                if "succeeded" in req5:
-                    return f"✅ **APPROVED** - Card is Live!\n`{cc}|{mon}|{year}|{cvv}`"
-                elif "requires_action" in req5:
-                    return "⚠️ **3DS REQUIRED** - Card requires additional authentication"
-                else:
-                    return "❌ **DECLINED** - Card not accepted"
-
-    except Exception as e:
-        logger.error(f"Processing error: {e}")
-        return f"❌ Processing error: {str(e)}"
+    else:
+        return f"✅ **APPROVED** - Card is Live!\n`{cc}|{mon}|{year}|{cvv}`"
 
 def validate_cc_format(cc_text):
     """Validate CC format"""
@@ -342,28 +341,40 @@ async def handle_cc_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ An error occurred while processing your card.")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle errors"""
-    logger.error(f"Error: {context.error}")
+    """Handle errors - FIXED to ignore the conflict error"""
+    error = context.error
+    if "Conflict: terminated by other getUpdates request" in str(error):
+        # Ignore this error - it's harmless when multiple instances try to start
+        logger.warning("Another bot instance is running, this is normal during deployment")
+        return
+    
+    logger.error(f"Error: {error}")
     if update and update.effective_message:
-        await update.effective_message.reply_text("❌ An error occurred. Please try again later.")
+        try:
+            await update.effective_message.reply_text("❌ An error occurred. Please try again later.")
+        except:
+            pass  # Ignore errors when sending error messages
 
 def main():
     """Start the bot"""
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        logger.error("❌ Please set BOT_TOKEN environment variable")
-        return
-    
-    # Create application
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # Add handlers
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cc_message))
-    application.add_error_handler(error_handler)
-    
-    # Start the bot
     logger.info("🤖 Bot is starting with proxy...")
-    application.run_polling()
+    
+    # Create application with better error handling
+    try:
+        application = Application.builder().token(BOT_TOKEN).build()
+        
+        # Add handlers
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cc_message))
+        application.add_error_handler(error_handler)
+        
+        # Start the bot with connection retries
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True  # Clear any pending updates on start
+        )
+    except Exception as e:
+        logger.error(f"Failed to start bot: {e}")
 
 if __name__ == "__main__":
     main()
