@@ -229,10 +229,16 @@ async def process_cc_check(card_data, user_info=""):
                             elif 'requires_action' in str(response_data):
                                 return "⚠️ **3DS REQUIRED** - Card requires additional authentication"
                         else:
-                            error_msg = response_data.get('data', {}).get('message', response_data.get('message', 'Card declined'))
+                            # Defensive check for dict
+                            data_field = response_data.get('data')
+                            error_msg = None
+                            if isinstance(data_field, dict):
+                                error_msg = data_field.get('message')
+                            if not error_msg:
+                                error_msg = response_data.get('message', 'Card declined')
                             return f"❌ **DECLINED** - {error_msg}"
-                except json.JSONDecodeError:
-                    # Fall back to string parsing if JSON fails
+                except Exception as ex:
+                    logger.error(f"JSON parsing error: {ex}")
                     pass
             
             # String-based parsing as fallback
