@@ -13,8 +13,8 @@ app = FastAPI()
 
 # --- Environment Variables ---
 # Telegram bot info
-BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN") # Replace with your actual bot token
-USER_ID = os.getenv("USER_ID", "YOUR_TELEGRAM_USER_ID")     # Replace with your actual user ID
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8411567693:AAE7Yqpy4u9YZqL5DT3-hb0NZgLqTfnFEL0") # Replace with your actual bot token
+USER_ID = os.getenv("USER_ID", "1409419332")     # Replace with your actual user ID
 
 # Proxy info
 PROXY_URL = os.getenv("PROXY_URL", "http://na.proxys5.net:6200")
