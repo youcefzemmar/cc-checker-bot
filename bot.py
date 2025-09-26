@@ -17,7 +17,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot configuration
-BOT_TOKEN = os.getenv('BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
+BOT_TOKEN = os.getenv('BOT_TOKEN', '8411567693:AAE7Yqpy4u9YZqL5DT3-hb0NZgLqTfnFEL0')
 
 # Proxy configuration
 PROXY_URL = "socks5://89565483-zone-custom:M5o5HIxR@na.proxys5.net:6200"
