@@ -17,7 +17,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot configuration
-BOT_TOKEN = os.getenv('BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
+BOT_TOKEN = os.getenv('BOT_TOKEN', '8411567693:AAE7Yqpy4u9YZqL5DT3-hb0NZgLqTfnFEL0')
 
 def parseX(data, start, end):
     try:
