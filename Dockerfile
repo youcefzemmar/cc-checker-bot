@@ -21,10 +21,9 @@ RUN apt-get update && \
         libgtk-3-0 \
         fonts-liberation \
         xdg-utils \
-        libgdk-pixbuf2.0-0 \
         libxss1 \
-        lsb-release && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+        lsb-release \
+        && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
